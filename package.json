@@ -1,7 +1,6 @@
 {
   "name": "private-tab-vault-backend",
   "version": "1.0.0",
-  "description": "Private encrypted tab vault backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
