@@ -1,7 +1,4 @@
 const express = require("express");
-const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,29 +9,36 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "2mb" }));
 
-const DATA_DIR = process.env.DATA_DIR || "./data";
-const VAULT_FILE = path.join(DATA_DIR, "vault.json");
-
-// Create data directory
-if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-// --------------------------------------------------
-// Simple API key protection
-// --------------------------------------------------
-// Put a long random value in Render environment variables:
-// API_KEY=your-long-random-secret
-//
-// The frontend/extension sends:
-// Authorization: Bearer YOUR_API_KEY
-// --------------------------------------------------
-
 const API_KEY = process.env.API_KEY;
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const D1_DATABASE_ID = process.env.D1_DATABASE_ID;
+
+// --------------------------------------------------
+// Startup configuration check
+// --------------------------------------------------
+
+console.log("Starting Tab-Pri backend...");
 
 if (!API_KEY) {
     console.warn("WARNING: API_KEY is not configured.");
 }
+
+if (!CLOUDFLARE_API_TOKEN) {
+    console.warn("WARNING: CLOUDFLARE_API_TOKEN is not configured.");
+}
+
+if (!CLOUDFLARE_ACCOUNT_ID) {
+    console.warn("WARNING: CLOUDFLARE_ACCOUNT_ID is not configured.");
+}
+
+if (!D1_DATABASE_ID) {
+    console.warn("WARNING: D1_DATABASE_ID is not configured.");
+}
+
+// --------------------------------------------------
+// Authentication
+// --------------------------------------------------
 
 function authenticate(req, res, next) {
     if (!API_KEY) {
@@ -55,47 +59,117 @@ function authenticate(req, res, next) {
 }
 
 // --------------------------------------------------
+// D1 helper
+// --------------------------------------------------
+
+async function d1Query(sql, params = []) {
+    if (!CLOUDFLARE_API_TOKEN) {
+        throw new Error("CLOUDFLARE_API_TOKEN is not configured");
+    }
+
+    if (!CLOUDFLARE_ACCOUNT_ID) {
+        throw new Error("CLOUDFLARE_ACCOUNT_ID is not configured");
+    }
+
+    if (!D1_DATABASE_ID) {
+        throw new Error("D1_DATABASE_ID is not configured");
+    }
+
+    const url =
+        `https://api.cloudflare.com/client/v4/accounts/` +
+        `${CLOUDFLARE_ACCOUNT_ID}/d1/database/` +
+        `${D1_DATABASE_ID}/query`;
+
+    const response = await fetch(url, {
+        method: "POST",
+
+        headers: {
+            "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}`,
+            "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+            sql,
+            params
+        })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+        console.error("Cloudflare D1 error:", data);
+
+        throw new Error(
+            data.errors?.[0]?.message ||
+            "Cloudflare D1 request failed"
+        );
+    }
+
+    return data;
+}
+
+// --------------------------------------------------
 // Health check
 // --------------------------------------------------
 
 app.get("/", (req, res) => {
     res.json({
         status: "online",
-        service: "Private Tab Vault"
+        service: "Private Tab Vault",
+        database: "Cloudflare D1"
     });
 });
 
-app.get("/health", (req, res) => {
-    res.json({
-        status: "ok",
-        timestamp: new Date().toISOString()
-    });
-});
-
-// --------------------------------------------------
-// Get encrypted vault
-// --------------------------------------------------
-
-app.get("/api/vault", authenticate, (req, res) => {
+app.get("/health", async (req, res) => {
     try {
-        if (!fs.existsSync(VAULT_FILE)) {
+        await d1Query("SELECT 1");
+
+        res.json({
+            status: "ok",
+            database: "connected",
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            status: "error",
+            database: "disconnected"
+        });
+    }
+});
+
+// --------------------------------------------------
+// GET VAULT
+// --------------------------------------------------
+
+app.get("/api/vault", authenticate, async (req, res) => {
+    try {
+        const result = await d1Query(
+            "SELECT id, encrypted_data, updated_at FROM vault WHERE id = 1"
+        );
+
+        const rows = result.result?.[0]?.results || [];
+
+        if (rows.length === 0) {
             return res.json({
                 exists: false,
                 vault: null
             });
         }
 
-        const data = JSON.parse(
-            fs.readFileSync(VAULT_FILE, "utf8")
-        );
-
         res.json({
             exists: true,
-            vault: data
+            vault: {
+                id: rows[0].id,
+                encrypted_data: rows[0].encrypted_data,
+                updated_at: rows[0].updated_at
+            }
         });
 
     } catch (error) {
-        console.error(error);
+        console.error("GET vault error:", error);
 
         res.status(500).json({
             error: "Could not read vault"
@@ -104,10 +178,10 @@ app.get("/api/vault", authenticate, (req, res) => {
 });
 
 // --------------------------------------------------
-// Save encrypted vault
+// SAVE VAULT
 // --------------------------------------------------
 
-app.put("/api/vault", authenticate, (req, res) => {
+app.put("/api/vault", authenticate, async (req, res) => {
     try {
         const vault = req.body;
 
@@ -117,37 +191,54 @@ app.put("/api/vault", authenticate, (req, res) => {
             });
         }
 
-        // Basic size protection
-        const serialized = JSON.stringify(vault);
+        if (
+            typeof vault.encrypted_data !== "string" ||
+            vault.encrypted_data.length === 0
+        ) {
+            return res.status(400).json({
+                error: "encrypted_data is required"
+            });
+        }
 
-        if (Buffer.byteLength(serialized, "utf8") > 2 * 1024 * 1024) {
+        // 2 MB maximum
+        if (Buffer.byteLength(
+            vault.encrypted_data,
+            "utf8"
+        ) > 2 * 1024 * 1024) {
             return res.status(413).json({
                 error: "Vault is too large"
             });
         }
 
-        // Atomic-ish write:
-        // write temporary file first, then replace old file.
-        const tempFile = `${VAULT_FILE}.tmp`;
+        const updatedAt = new Date().toISOString();
 
-        fs.writeFileSync(
-            tempFile,
-            serialized,
-            {
-                encoding: "utf8",
-                mode: 0o600
-            }
+        await d1Query(
+            `
+            INSERT INTO vault (
+                id,
+                encrypted_data,
+                updated_at
+            )
+            VALUES (1, ?, ?)
+
+            ON CONFLICT(id)
+            DO UPDATE SET
+                encrypted_data = excluded.encrypted_data,
+                updated_at = excluded.updated_at
+            `,
+            [
+                vault.encrypted_data,
+                updatedAt
+            ]
         );
-
-        fs.renameSync(tempFile, VAULT_FILE);
 
         res.json({
             success: true,
-            savedAt: new Date().toISOString()
+            savedAt: updatedAt
         });
 
     } catch (error) {
-        console.error(error);
+        console.error("SAVE vault error:", error);
 
         res.status(500).json({
             error: "Could not save vault"
@@ -156,21 +247,21 @@ app.put("/api/vault", authenticate, (req, res) => {
 });
 
 // --------------------------------------------------
-// Delete vault
+// DELETE VAULT
 // --------------------------------------------------
 
-app.delete("/api/vault", authenticate, (req, res) => {
+app.delete("/api/vault", authenticate, async (req, res) => {
     try {
-        if (fs.existsSync(VAULT_FILE)) {
-            fs.unlinkSync(VAULT_FILE);
-        }
+        await d1Query(
+            "DELETE FROM vault WHERE id = 1"
+        );
 
         res.json({
             success: true
         });
 
     } catch (error) {
-        console.error(error);
+        console.error("DELETE vault error:", error);
 
         res.status(500).json({
             error: "Could not delete vault"
@@ -183,5 +274,7 @@ app.delete("/api/vault", authenticate, (req, res) => {
 // --------------------------------------------------
 
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Private Tab Vault running on port ${PORT}`);
+    console.log(
+        `Private Tab Vault running on port ${PORT}`
+    );
 });
