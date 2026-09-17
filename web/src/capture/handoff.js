@@ -4,41 +4,31 @@ const CHANNEL = "tab-pri-capture";
 
 function dispatchCapture(session) {
   const normalized = normalizeCaptureSession(session);
-  window.dispatchEvent(
-    new CustomEvent("tab-pri:capture", {
-      detail: normalized,
-    }),
-  );
+  window.dispatchEvent(new CustomEvent("tab-pri:capture", { detail: normalized }));
   return normalized;
 }
 
-/**
- * Accept a session sent by an Android companion or another trusted local
- * integration through a deep-link handoff.
- *
- * Example:
- *   https://tab-pri.example/#capture=<base64url(json)>
- *
- * This function does not persist anything. The caller must present the
- * captured session to the user and only then merge/encrypt it.
- */
-export function consumeDeepLinkCapture(locationLike = window.location) {
-  const hash = String(locationLike.hash || "");
-  const match = hash.match(/(?:^|&)capture=([^&]+)/);
-  if (!match) return null;
+function fromBase64Url(encoded) {
+  const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(encoded.length + ((4 - encoded.length % 4) % 4), "=");
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
 
+export function consumeDeepLinkCapture(locationLike = window.location) {
+  const rawHash = String(locationLike.hash || "");
+  if (!rawHash.startsWith("#")) return null;
+  const params = new URLSearchParams(rawHash.slice(1));
+  const encoded = params.get("capture");
+  if (!encoded) return null;
   try {
-    const encoded = match[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = encoded.padEnd(encoded.length + ((4 - encoded.length % 4) % 4), "=");
-    const json = decodeURIComponent(escape(atob(padded)));
-    const parsed = JSON.parse(json);
-    return dispatchCapture(parsed);
-  } catch {
+    return dispatchCapture(JSON.parse(fromBase64Url(encoded)));
+  } catch (error) {
+    console.warn("Invalid Tab-Pri capture payload", error);
     return null;
   }
 }
 
-/** Used by tests and trusted local integrations. */
 export function emitCaptureSession(session) {
   return dispatchCapture(session);
 }
