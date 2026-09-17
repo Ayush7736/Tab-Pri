@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Tab-Pri Capture",
+  "version": "0.2.0",
+  "description": "User-triggered browser session capture for Tab-Pri.",
+  "permissions": ["tabs"],
+  "host_permissions": ["http://localhost:5173/*", "https://tab-pri.vercel.app/*"],
+  "incognito": "spanning",
+  "action": { "default_title": "Capture tabs with Tab-Pri" },
+  "background": { "service_worker": "service-worker.js", "type": "module" }
+}
