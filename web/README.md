@@ -1,17 +1,41 @@
 # Tab-Pri Web
 
-The web/PWA is the primary mobile-first vault interface.
+The runnable mobile-first PWA for the private encrypted tab vault.
 
-It is intentionally separate from the existing backend skeleton so the Render + D1 service stays stable.
+## Local PC test
 
-## Responsibilities
+```cmd
+cd web
+npm install
+npm run dev
+```
 
-- Client-side vault encryption/decryption.
-- Mobile-first vault UI.
-- Browser capture handoff receiver.
-- Group/tab management.
-- Search and favorites.
-- Password-change workflow.
-- Destructive vault deletion workflow.
+Create `web/.env.local` locally (never commit it):
 
-The browser capture layer must hand plaintext tabs to this app only inside the local client boundary. The master password and backend API credentials are never placed in the Android companion.
+```env
+RENDER_API_KEY=your_tab_pri_random_secret
+```
+
+The Vite dev server injects this secret only into its local proxy. The browser never receives it.
+
+## Production
+
+Deploy the repository with Vercel using the included `vercel.json`. Add these Vercel environment variables:
+
+- `RENDER_API_KEY` — the same random Tab-Pri backend secret configured on Render.
+- `RENDER_ORIGIN` — optional; defaults to `https://tab-pri.onrender.com`.
+
+The root `/api/vault` serverless function keeps the Render secret server-side.
+
+## Security model
+
+- Master passwords never leave the browser.
+- Vault data is encrypted with PBKDF2-SHA-256 + AES-256-GCM before saving.
+- Render/D1 receives only the encrypted vault blob.
+- Password changes decrypt locally, then encrypt again with a fresh salt.
+- Destroying the vault sends only an authenticated DELETE request.
+- Browser capture is user-triggered; private tabs are marked `private` and require the same explicit save action as normal tabs.
+
+## Current capture transport
+
+The desktop Chromium extension captures open tabs and sends a normalized session to the local PWA through a base64url hash handoff. It is suitable for the first PC test. A later transport can replace the hash when very large sessions need a more robust channel.
