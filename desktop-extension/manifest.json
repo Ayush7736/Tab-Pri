@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Tab-Pri Capture",
+  "version": "0.1.0",
+  "description": "User-triggered browser session capture for Tab-Pri.",
+  "permissions": ["tabs"],
+  "action": {
+    "default_title": "Capture tabs with Tab-Pri"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  }
+}
